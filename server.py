@@ -11,6 +11,7 @@ import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "game_data.db")
 
+
 class GameServer:
     def __init__(self, host='localhost', port=5555):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -19,14 +20,14 @@ class GameServer:
         self.server.listen(2)
 
         self.clients = []
+        # Сопоставление сокета с постоянным ID игрока (0 или 1).
+        self.client_player_ids = {}
         self.names = ["Игрок 1", "Игрок 2"]
         self.ready_players = 0
-
         # Инициализация базы данных
         init_db()
         self.session_id = None
         self.session_start_time = None
-
         # Состояние игры
         self.game_state = {
             "players": {},
@@ -41,7 +42,6 @@ class GameServer:
             "message": "",
             "message_timer": 0
         }
-
         self.line_cards = {key: [] for key in ["p1_back", "p1_front", "p2_front", "p2_back"]}
 
         self.decks = {"p1": [], "p2": []}
@@ -89,39 +89,39 @@ class GameServer:
         except Exception as e:
             print(f"[SERVER] Ошибка получения: {e}")
             return None
-        
+
     def check_and_apply_mage_synergy(self, newly_placed_card=None):
         """Проверяет и применяет синергию магов"""
         all_cards = []
         for key, cards in self.line_cards.items():
             all_cards.extend(cards)
-        
+
         has_fire_mage = any(card.get("name") == "Огненный маг" for card in all_cards)
         has_ice_mage = any(card.get("name") == "Ледяной маг" for card in all_cards)
-        
+
         if not has_fire_mage or not has_ice_mage:
             return False
-        
+
         fire_mage = None
         ice_mage = None
-        
+
         for card in all_cards:
             if card.get("name") == "Огненный маг":
                 fire_mage = card
             elif card.get("name") == "Ледяной маг":
                 ice_mage = card
-        
+
         if not fire_mage or not ice_mage:
             return False
-        
+
         if fire_mage.get("mage_buffed") or ice_mage.get("mage_buffed"):
             return False
-        
+
         fire_mage["power"] += 2
         ice_mage["power"] += 2
         fire_mage["mage_buffed"] = True
         ice_mage["mage_buffed"] = True
-        
+
         print(f"[SERVER] Активирована синергия магов: оба получают +2")
         return True
 
@@ -140,26 +140,25 @@ class GameServer:
     def disconnect_client(self, client, player_id):
         if client in self.clients:
             self.clients.remove(client)
+            self.client_player_ids.pop(client, None)
             client.close()
             print(f"[SERVER] Игрок {player_id+1} отключился")
-
             if not self.game_state["game_started"]:
                 player_key = f"p{player_id+1}"
                 if player_key in self.game_state["players"]:
                     self.game_state["players"][player_key]["ready"] = False
                     self.ready_players = max(0, self.ready_players - 1)
-            
+
             if len(self.clients) > 0:
                 self.broadcast({"type": "player_disconnected", "player": player_id+1})
 
     def handle_game_action(self, data, player_id):
         action = data.get("action")
         player_key = f"p{player_id+1}"
-
         if action == "ready":
             # ЛОГИКА ЗАГРУЗКИ КОЛОДЫ
             deck_names = data.get("deck_cards", [])
-            
+
             # 1. Проверяем размер колоды (должно быть строго 20 карт)
             if len(deck_names) != 20:
                 print(f"[SERVER] Игрок {player_id+1} прислал некорректную колоду ({len(deck_names)} карт). Требуется ровно 20 карт.")
@@ -168,7 +167,6 @@ class GameServer:
                     "game_state": {**self.game_state, "message": "В колоде должно быть ровно 20 карт!", "message_timer": time.time() + 4}
                 })
                 return
-
             # 2. Конвертируем имена карт в объекты
             player_deck_objects = []
             for name in deck_names:
@@ -177,29 +175,26 @@ class GameServer:
                     player_deck_objects.append(card_obj)
                 else:
                     print(f"[SERVER] Неизвестная карта '{name}' в колоде игрока {player_id+1}")
-            
+
             # Проверяем, что после конвертации осталось ровно 20 карт
             if len(player_deck_objects) != 20:
-                 self.send_message(self.clients[player_id], {
+                self.send_message(self.clients[player_id], {
                     "type": "game_update",
                     "game_state": {**self.game_state, "message": "Ошибка валидации карт!", "message_timer": time.time() + 4}
                 })
-                 return
-
+                return
             # 3. Перемешиваем и сохраняем колоду для этого игрока
             random.shuffle(player_deck_objects)
             self.decks[player_key] = player_deck_objects
             print(f"[SERVER] Колода игрока {player_id+1} загружена: {len(self.decks[player_key])} карт")
-
             # Ставим статус "Готов"
             if not self.game_state["players"].get(player_key, {}).get("ready"):
                 self.ready_players += 1
                 self.game_state["players"][player_key] = {"name": self.names[player_id], "ready": True}
                 self.broadcast({"type": "player_ready", "player": player_id+1, "ready_players": self.ready_players})
-                
+
                 if self.ready_players == 2 and not self.game_state["game_started"]:
                     self.start_game()
-
         elif action == "place_card":
             if self.game_state["current_turn"] != player_id:
                 return
@@ -209,7 +204,6 @@ class GameServer:
             if card_index < len(self.hands[player_key]):
                 card_obj = self.hands[player_key][card_index]
                 line_type = "front" if "front" in line_key else "back"
-
                 if line_type in card_obj.allowed_lines:
                     placed_card = self.hands[player_key].pop(card_index)
                     card_data = {
@@ -222,18 +216,16 @@ class GameServer:
                         "placed": True
                     }
                     self.line_cards[line_key].append(card_data)
-
                     synergy_applied = self.check_and_apply_mage_synergy(card_data)
-                    
+
                     if placed_card.ability:
                         try:
                             placed_card.ability(self.line_cards, card_data, line_key)
                         except Exception as e:
                             print(f"[SERVER] Ошибка при активации способности {placed_card.name}: {e}")
-                    
+
                     if placed_card.ability or synergy_applied:
                         self.show_message(f"{card_data['name']} активировал способность!", 2)
-
                     self.recalc_scores()
                     log_action(self.session_id, player_key, "place_card",
                                placed_card.name, placed_card.power, line_key,
@@ -241,25 +233,22 @@ class GameServer:
 
                     update_card_statistics(placed_card.name, placed_card.power,
                                            ability_used=bool(placed_card.ability))
-
                     other_player_id = 1 - player_id
                     other_player_key = f"p{other_player_id+1}"
                     if not self.game_state["passed"][other_player_key]:
                         self.game_state["current_turn"] = other_player_id
-
                     self.game_state["passed"][player_key] = False
                     self.update_all_clients()
                 else:
                     self.show_message("Нельзя разместить здесь!", 2)
                     self.update_client(player_id)
-
         elif action == "pass_turn":
             self.game_state["passed"][player_key] = True
             self.show_message(f"Игрок {player_id+1} пасует до конца раунда", 2)
-            
+
             log_action(self.session_id, player_key, "pass_turn",
                        None, None, None, self.game_state, self.game_state["round"])
-            
+
             # Проверка, спасовали ли оба
             if self.game_state["passed"]["p1"] and self.game_state["passed"]["p2"]:
                 time.sleep(1)
@@ -270,9 +259,8 @@ class GameServer:
                 # Проверяем, пасовал ли уже другой игрок
                 if not self.game_state["passed"][other_player_key]:
                     self.game_state["current_turn"] = other_player_id
-            
-            self.update_all_clients()
 
+            self.update_all_clients()
         elif action == "chat_message":
             self.broadcast({
                 "type": "chat_message",
@@ -311,7 +299,7 @@ class GameServer:
                 print(f"[SERVER] У игрока {player} закончились карты в колоде!")
                 self.show_message(f"У {player} закончились карты!", 2)
                 break
-        
+
         print(f"[SERVER] Игрок {player} получил {cards_drawn} карт. Осталось в колоде: {len(self.decks[player])}")
 
     def recalc_scores(self):
@@ -325,7 +313,6 @@ class GameServer:
     def end_round(self):
         p1_score = self.game_state["score"]["p1"]
         p2_score = self.game_state["score"]["p2"]
-
         if p1_score > p2_score:
             self.game_state["lives"]["p2"] -= 1
             round_winner = "Игрок 1"
@@ -338,18 +325,15 @@ class GameServer:
             round_winner = "Ничья"
 
         self.show_message(f"Раунд {self.game_state['round']} за {round_winner}", 3)
-
         for key, cards in self.line_cards.items():
             for c in cards:
                 update_card_statistics(c["name"], c["power"], ability_used=bool(c.get("ability")))
-
         if self.game_state["lives"]["p1"] <= 0 or self.game_state["lives"]["p2"] <= 0:
             self.game_state["game_over"] = True
             if self.game_state["lives"]["p1"] == self.game_state["lives"]["p2"]:
                 self.game_state["winner"] = "Ничья"
             else:
                 self.game_state["winner"] = "Игрок 1" if self.game_state["lives"]["p1"] > 0 else "Игрок 2"
-
             duration = int(time.time() - self.session_start_time)
             end_game_session(self.session_id, self.game_state["winner"],
                              self.game_state["round"], duration)
@@ -358,47 +342,69 @@ class GameServer:
             self.game_state["round"] += 1
             # СБРАСЫВАЕМ ФЛАГИ ПАСА ТОЛЬКО ЗДЕСЬ - В НАЧАЛЕ НОВОГО РАУНДА
             self.game_state["passed"] = {"p1": False, "p2": False}
-            
             # Очистка поля
             for key in self.line_cards:
                 # Сбрасываем флаги баффов
                 for card in self.line_cards[key]:
                     card.pop("mage_buffed", None)
                 self.line_cards[key].clear()
-                
+
             # Выдаем следующие 5 случайных карт из оставшейся колоды
             print(f"[SERVER] Начало раунда {self.game_state['round']}. Раздача 5 карт.")
             self.draw_cards("p1", 5)
             self.draw_cards("p2", 5)
-            
+
             # Определяем первого ходящего в новом раунде
             self.game_state["current_turn"] = 0 if self.game_state["round"] % 2 != 0 else 1
-
         self.recalc_scores()
         self.update_all_clients()
 
     def update_client(self, player_id):
-        game_data = self.get_game_data()
-        self.send_message(self.clients[player_id], game_data)
+        """Отправляет обновление только указанному игроку."""
+        for client, connected_player_id in list(self.client_player_ids.items()):
+            if connected_player_id == player_id:
+                self.send_message(client, self.get_game_data(player_id))
+                return
 
     def update_all_clients(self):
-        game_data = self.get_game_data()
-        self.broadcast(game_data)
+        """Отправляет состояние каждому клиенту с учётом его ID."""
+        for client, player_id in list(self.client_player_ids.items()):
+            self.send_message(client, self.get_game_data(player_id))
 
-    def get_game_data(self):
-        game_data = {"type": "game_update", "game_state": self.game_state,
-                     "line_cards": {}, "hands": {}}
+    def get_game_data(self, player_id):
+        """Формирует состояние игры без раскрытия руки соперника."""
+        game_data = {
+            "type": "game_update",
+            "game_state": self.game_state,
+            "line_cards": {},
+            "hands": {}
+        }
+
+        # Все карты, уже выложенные на стол, являются публичными.
         for key, cards in self.line_cards.items():
-            game_data["line_cards"][key] = [{"name": c["name"],
-                                             "power": c["power"],
-                                             "image_path": c["image_path"],
-                                             "player": c["player"]} for c in cards]
-        for player in ["p1", "p2"]:
-            game_data["hands"][player] = [{"name": c.name,
-                                           "power": c.power,
-                                           "allowed_lines": c.allowed_lines,
-                                           "image_path": c.image_path,
-                                           "ability": c.ability.__name__ if c.ability else None} for c in self.hands[player]]
+            game_data["line_cards"][key] = [
+                {
+                    "name": card["name"],
+                    "power": card["power"],
+                    "image_path": card["image_path"],
+                    "player": card["player"]
+                }
+                for card in cards
+            ]
+
+        # В сообщение включается только рука получателя.
+        player_key = f"p{player_id + 1}"
+        game_data["hands"][player_key] = [
+            {
+                "name": card.name,
+                "power": card.power,
+                "allowed_lines": card.allowed_lines,
+                "image_path": card.image_path,
+                "ability": card.ability.__name__ if card.ability else None
+            }
+            for card in self.hands[player_key]
+        ]
+
         return game_data
 
     def run(self):
@@ -409,6 +415,7 @@ class GameServer:
                 print(f"[SERVER] Новое подключение: {address}")
                 self.clients.append(client)
                 player_id = len(self.clients) - 1
+                self.client_player_ids[client] = player_id
                 self.send_message(client, {"type": "welcome",
                                            "player_id": player_id,
                                            "player_name": self.names[player_id]})
@@ -420,7 +427,6 @@ class GameServer:
                 break
             except Exception as e:
                 print(f"[SERVER] Ошибка подключения: {e}")
-
         try:
             while True:
                 if self.game_state["game_over"]:
